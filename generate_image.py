@@ -9,7 +9,7 @@ import os
 import random
 from chainer import cuda
 
-from commons import initialize_model, load_module
+from commons import init_model, load_module
 
 
 def parse_arguments():
@@ -18,7 +18,7 @@ def parse_arguments():
 
     parser.add_argument(
         'config',
-        help='a configuration file in which Generator is defined (.py)'
+        help='a python module in which Generator is defined (.py)'
     )
     parser.add_argument(
         '-g', '--gpu', default=-1, type=int,
@@ -54,7 +54,8 @@ def generate_image(config, gpu_id=-1, n_lines=8, param=None, random_seed=0):
     image_generator = config.Generator()
 
     # load parameters for Generator
-    initialize_model(image_generator, param)
+    if not init_model(image_generator, param):
+        print('warning: Generator param is not specified')
 
     # set random seed
     random.seed(random_seed)
