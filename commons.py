@@ -1,9 +1,44 @@
 # -*- coding: utf-8 -*-
 
+import chainer
 import imp
+import numpy as np
 import os
 from chainer import functions as F
 from chainer import serializers
+
+
+class ModelOptimizerSet(object):
+    """A set of a nn model and its optimizer."""
+
+    SAVE_PARAM_FORMAT = 'trained-params_{0}_update-{1:09d}.npz'
+    SAVE_STATE_FORMAT = 'optimizer-state_{0}_update-{1:09d}.npz'
+
+    def __init__(self, model, optimizer):
+        assert isinstance(model, chainer.Link)
+        assert isinstance(optimizer, chainer.Optimizer)
+        self.model = model
+        self.optimizer = optimizer
+
+    def save_model(self, model_type, out_dir='./'):
+        output_file_path = os.path.join(
+            out_dir,
+            ModelOptimizerSet.SAVE_PARAM_FORMAT.format(model_type,
+                                                       self.optimizer.t))
+        serializers.save_npz(output_file_path, self.model)
+        print('save ' + output_file_path)
+
+    def save_optimizer(self, model_type, out_dir='./'):
+        output_file_path = os.path.join(
+            out_dir,
+            ModelOptimizerSet.SAVE_STATE_FORMAT.format(model_type,
+                                                       self.optimizer.t))
+        serializers.save_npz(output_file_path, self.optimizer)
+        print('save ' + output_file_path)
+
+    def save(self, model_type, out_dir='./'):
+        self.save_model(model_type, out_dir=out_dir)
+        self.save_optimizer(model_type, out_dir=out_dir)
 
 
 def load_module(module_path):
@@ -14,12 +49,10 @@ def load_module(module_path):
     return imp.load_module(module_name, *info)
 
 
-def initialize_model(model, param=None, output_path=None):
+def init_model(model, param=None):
     """Save initial params or load params to resume."""
     if param is None:
-        if output_path is not None:
-            serializers.save_npz(output_path, model)
-            print('save ' + output_path)
+        return False
     else:
         ext = os.path.splitext(param)[1]
 
@@ -33,16 +66,21 @@ def initialize_model(model, param=None, output_path=None):
 
         load_func(param, model)
         print('load ' + param)
+        return True
 
 
-def initialize_optimizer(optimizer, state=None, output_path=None):
+def init_optimizer(optimizer, state=None):
     """Save initial state or load state to resume."""
-    initialize_model(optimizer, state, output_path)
+    return init_model(optimizer, state)
 
 
 def l2_norm(var):
-    if var.data.ndim > 1:
-        return F.sqrt(F.sum(var * var,
-                            axis=tuple(range(1, var.data.ndim))))
-    else:
-        return var
+    """Calculate L2 norm of each sample."""
+    if var.ndim > 1:
+        if np.asarray(var.shape[1:]).prod() > 1:
+            return F.sqrt(F.sum(var * var,
+                          axis=tuple(range(1, var.ndim))))
+        else:
+            var = F.reshape(var, (-1,))
+
+    return abs(var)
