@@ -24,7 +24,7 @@ OPTIMIZER_DIS = optimizers.Adam(alpha=5e-5, beta1=0.9, beta2=0.999)
 DECAY_RATE_DIS = 1e-7
 
 KERNEL_DIM = 1
-EPSILON = 1
+KERNEL_EPS = 1
 
 
 class Generator(Chain):

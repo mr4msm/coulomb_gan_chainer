@@ -5,17 +5,15 @@ import argparse
 import chainer
 import numpy as np
 import os
-from chainer import cuda, optimizer, serializers
+from chainer import cuda, optimizer
 from chainer import computational_graph as graph
 from chainer import functions as F
 from datetime import datetime as dt
 
 from batch_generator import ImageBatchGenerator
+from commons import ModelOptimizerSet
 from commons import load_module
-from commons import initialize_model, initialize_optimizer
-
-SAVE_PARAMS_FORMAT = 'trained-params_{0}_update-{1:09d}.npz'
-SAVE_STATE_FORMAT = 'optimizer-state_{0}_update-{1:09d}.npz'
+from commons import init_model, init_optimizer
 
 
 def parse_arguments():
@@ -105,19 +103,21 @@ if __name__ == '__main__':
     update_max = config.UPDATE_MAX
     update_save_params = config.UPDATE_SAVE_PARAMS
     kernel_dim = getattr(config, 'KERNEL_DIM', 1)
-    epsilon = getattr(config, 'EPSILON', 1)
-
-    model_gen = config.Generator()
-    optimizer_gen = config.OPTIMIZER_GEN
-    optimizer_gen.setup(model_gen)
-    decay_g = getattr(config, 'DECAY_RATE_GEN', 1e-7)
-    optimizer_gen.add_hook(optimizer.WeightDecay(decay_g))
+    kernel_eps = getattr(config, 'KERNEL_EPS', 1)
 
     model_dis = config.Discriminator()
     optimizer_dis = config.OPTIMIZER_DIS
     optimizer_dis.setup(model_dis)
     decay_d = getattr(config, 'DECAY_RATE_DIS', 1e-7)
     optimizer_dis.add_hook(optimizer.WeightDecay(decay_d))
+    model_opt_set_dis = ModelOptimizerSet(model_dis, optimizer_dis)
+
+    model_gen = config.Generator()
+    optimizer_gen = config.OPTIMIZER_GEN
+    optimizer_gen.setup(model_gen)
+    decay_g = getattr(config, 'DECAY_RATE_GEN', 1e-7)
+    optimizer_gen.add_hook(optimizer.WeightDecay(decay_g))
+    model_opt_set_gen = ModelOptimizerSet(model_gen, optimizer_gen)
 
     # setup batch generator
     with open(args.dataset, 'r') as f:
@@ -135,20 +135,20 @@ if __name__ == '__main__':
     print('max update count = {}'.format(update_max))
     print('updates per saving params = {}'.format(update_save_params))
     print('plummer kernel dimension = {}'.format(kernel_dim))
-    print('plummer kernel epsilon = {}'.format(epsilon))
+    print('plummer kernel epsilon = {}'.format(kernel_eps))
 
     # save or load initial parameters for Discriminator
-    initialize_model(model_dis, args.param_dis,
-                     os.path.join(out_dir, SAVE_PARAMS_FORMAT.format('dis', optimizer_dis.t)))
-    # save or load initial parameters for Generator
-    initialize_model(model_gen, args.param_gen,
-                     os.path.join(out_dir, SAVE_PARAMS_FORMAT.format('gen', optimizer_gen.t)))
+    if not init_model(model_dis, param=args.param_dis):
+        model_opt_set_dis.save_model('dis', out_dir=out_dir)
     # save or load initial optimizer state for Discriminator
-    initialize_optimizer(optimizer_dis, args.state_dis,
-                         os.path.join(out_dir, SAVE_STATE_FORMAT.format('dis', optimizer_dis.t)))
+    if not init_optimizer(optimizer_dis, state=args.state_dis):
+        model_opt_set_dis.save_optimizer('dis', out_dir=out_dir)
+    # save or load initial parameters for Generator
+    if not init_model(model_gen, param=args.param_gen):
+        model_opt_set_gen.save_model('gen', out_dir=out_dir)
     # save or load initial optimizer state for Generator
-    initialize_optimizer(optimizer_gen, args.state_gen,
-                         os.path.join(out_dir, SAVE_STATE_FORMAT.format('gen', optimizer_gen.t)))
+    if not init_optimizer(optimizer_gen, state=args.state_gen):
+        model_opt_set_gen.save_optimizer('gen', out_dir=out_dir)
 
     # set current device and copy model to it
     xp = np
@@ -167,8 +167,8 @@ if __name__ == '__main__':
 
     initial_t = optimizer_gen.t
     sum_count = 0
-    sum_loss_g = 0.
-    sum_loss_d = 0.
+    sum_loss_dis = 0.
+    sum_loss_gen = 0.
 
     # training loop
     while optimizer_gen.t < update_max:
@@ -180,90 +180,56 @@ if __name__ == '__main__':
                              size=(batch_size, z_vec_dim)).astype('float32')
         x = model_gen(z)
 
-        loss_d = F.sum(F.square(model_dis(y) - potential(y, y, x.data,
-                                                         dim=kernel_dim,
-                                                         eps=epsilon,
-                                                         xp=xp)))
-        loss_d += F.sum(F.square(model_dis(x.data) - potential(x.data, y, x.data,
-                                                               dim=kernel_dim,
-                                                               eps=epsilon,
-                                                               xp=xp)))
-        loss_d /= batch_size
+        loss_dis = F.sum(F.square(model_dis(y) - potential(y, y, x.data,
+                                                           dim=kernel_dim,
+                                                           eps=kernel_eps,
+                                                           xp=xp)))
+        loss_dis += F.sum(F.square(model_dis(x.data) - potential(x.data, y, x.data,
+                                                                 dim=kernel_dim,
+                                                                 eps=kernel_eps,
+                                                                 xp=xp)))
+        loss_dis /= batch_size
 
         # update Discriminator
         model_dis.cleargrads()
-        loss_d.backward()
+        loss_dis.backward()
         optimizer_dis.update()
 
-        sum_loss_d += float(loss_d.data)
+        sum_loss_dis += float(loss_dis.data)
 
-        loss_g = F.sum(model_dis(x))
-        loss_g /= batch_size
+        loss_gen = F.sum(model_dis(x))
+        loss_gen /= batch_size
 
         # update Generator
         model_gen.cleargrads()
-        loss_g.backward()
+        loss_gen.backward()
         optimizer_gen.update()
 
-        sum_loss_g += float(loss_g.data)
+        sum_loss_gen += float(loss_gen.data)
         sum_count += 1
 
         # show losses
-        print('{0}: update # {1:09d}: C loss = {2:6.4e}, G loss = {3:6.4e}'.format(
+        print('{0}: update # {1:09d}: D loss = {2:6.4e}, G loss = {3:6.4e}'.format(
             str(dt.now()), optimizer_gen.t,
-            float(loss_d.data), float(loss_g.data)))
+            float(loss_dis.data), float(loss_gen.data)))
 
         # output computational graph, if needed
         if args.computational_graph and optimizer_gen.t == (initial_t + 1):
             with open('graph.dot', 'w') as o:
-                o.write(graph.build_computational_graph((loss_d, )).dump())
+                o.write(graph.build_computational_graph((loss_dis, loss_gen)).dump())
             print('graph generated')
 
         # show mean losses, save interim trained parameters and optimizer states
         if optimizer_gen.t % update_save_params == 0:
             print('{0}: mean of latest {1:06d} in {2:09d} updates : D loss = {3:7.5e}, G loss = {4:7.5e}'.format(
-                str(dt.now()), sum_count, optimizer_gen.t, sum_loss_d / sum_count, sum_loss_g / sum_count))
+                str(dt.now()), sum_count, optimizer_gen.t, sum_loss_dis / sum_count, sum_loss_gen / sum_count))
             sum_count = 0
-            sum_loss_g = 0.
-            sum_loss_d = 0.
+            sum_loss_dis = 0.
+            sum_loss_gen = 0.
 
-            output_file_path = os.path.join(
-                out_dir, SAVE_PARAMS_FORMAT.format('gen', optimizer_gen.t))
-            serializers.save_npz(output_file_path, model_gen)
-            print('save ' + output_file_path)
-
-            output_file_path = os.path.join(
-                out_dir, SAVE_PARAMS_FORMAT.format('dis', optimizer_dis.t))
-            serializers.save_npz(output_file_path, model_dis)
-            print('save ' + output_file_path)
-
-            output_file_path = os.path.join(
-                out_dir, SAVE_STATE_FORMAT.format('gen', optimizer_gen.t))
-            serializers.save_npz(output_file_path, optimizer_gen)
-            print('save ' + output_file_path)
-
-            output_file_path = os.path.join(
-                out_dir, SAVE_STATE_FORMAT.format('dis', optimizer_dis.t))
-            serializers.save_npz(output_file_path, optimizer_dis)
-            print('save ' + output_file_path)
+            model_opt_set_gen.save('gen', out_dir=out_dir)
+            model_opt_set_dis.save('dis', out_dir=out_dir)
 
     # save final trained parameters and optimizer states
-    output_file_path = os.path.join(
-        out_dir, SAVE_PARAMS_FORMAT.format('gen', optimizer_gen.t))
-    serializers.save_npz(output_file_path, model_gen)
-    print('save ' + output_file_path)
-
-    output_file_path = os.path.join(
-        out_dir, SAVE_PARAMS_FORMAT.format('dis', optimizer_dis.t))
-    serializers.save_npz(output_file_path, model_dis)
-    print('save ' + output_file_path)
-
-    output_file_path = os.path.join(
-        out_dir, SAVE_STATE_FORMAT.format('gen', optimizer_gen.t))
-    serializers.save_npz(output_file_path, optimizer_gen)
-    print('save ' + output_file_path)
-
-    output_file_path = os.path.join(
-        out_dir, SAVE_STATE_FORMAT.format('dis', optimizer_dis.t))
-    serializers.save_npz(output_file_path, optimizer_dis)
-    print('save ' + output_file_path)
+    model_opt_set_gen.save('gen', out_dir=out_dir)
+    model_opt_set_dis.save('dis', out_dir=out_dir)
