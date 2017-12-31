@@ -22,7 +22,7 @@ def parse_arguments():
 
     parser.add_argument(
         'config',
-        help='a configuration file in which networks, optimizers and hyper params are defined (.py)'
+        help='a python module in which networks, optimizers and hyper params are defined'
     )
     parser.add_argument(
         'dataset',
@@ -215,8 +215,8 @@ if __name__ == '__main__':
 
         # output computational graph, if needed
         if args.computational_graph and optimizer_gen.t == (initial_t + 1):
-            with open('graph.dot', 'w') as o:
-                o.write(graph.build_computational_graph((loss_dis, loss_gen)).dump())
+            with open(os.path.join(out_dir, 'graph.dot'), 'w') as f:
+                f.write(graph.build_computational_graph((loss_dis, loss_gen)).dump())
             print('graph generated')
 
         # show mean losses, save interim trained parameters and optimizer states
